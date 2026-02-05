@@ -53,6 +53,11 @@ All colors MUST be HSL.
     --sidebar-border: 220 13% 91%;
 
     --sidebar-ring: 217.2 91.2% 59.8%;
+    
+    /* Desktop/VM colors */
+    --desktop: 220 25% 12%;
+    --vm-screen: 0 0% 0%;
+    --vm-text: 120 100% 50%;
   }
 
   .dark {
