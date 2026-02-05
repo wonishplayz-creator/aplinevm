@@ -1,20 +1,18 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+// Import WASM from node_modules
+import v86WasmUrl from 'v86/build/v86.wasm?url';
 
-declare global {
-  interface Window {
-    V86Starter: new (options: V86Options) => V86Instance;
-  }
-}
-
+// v86 types
 interface V86Options {
-  wasm_path: string;
+  wasm_path?: string;
+  wasm_fn?: (options: { env: Record<string, unknown> }) => Promise<WebAssembly.Instance>;
   memory_size: number;
   vga_memory_size: number;
   screen_container: HTMLElement;
   bios: { url: string };
   vga_bios: { url: string };
   cdrom?: { url: string };
-  hda?: { url: string; async?: boolean };
+  hda?: { url: string; async?: boolean; size?: number };
   fda?: { url: string };
   bzimage?: { url: string };
   initrd?: { url: string };
@@ -22,10 +20,11 @@ interface V86Options {
   autostart: boolean;
   disable_keyboard?: boolean;
   disable_mouse?: boolean;
+  network_relay_url?: string;
 }
 
 interface V86Instance {
-  add_listener: (event: string, callback: (data: string) => void) => void;
+  add_listener: (event: string, callback: (data: unknown) => void) => void;
   serial0_send: (data: string) => void;
   keyboard_send_scancodes: (codes: number[]) => void;
   destroy: () => void;
@@ -40,12 +39,22 @@ interface V86EmulatorProps {
   onReady?: () => void;
 }
 
+// Use our edge function proxy for CORS-free access to v86 resources
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+const PROXY_BASE = `${SUPABASE_URL}/functions/v1/vm-image-proxy`;
+
+const BIOS_URL = `${PROXY_BASE}?image=bios`;
+const VGA_BIOS_URL = `${PROXY_BASE}?image=vgabios`;
+const WASM_URL = `${PROXY_BASE}?image=wasm`;
+const LINUX_IMAGE_URL = `${PROXY_BASE}?image=linux`;
+
 export const V86Emulator = ({ onStatusChange, onReady }: V86EmulatorProps) => {
   const screenRef = useRef<HTMLDivElement>(null);
   const emulatorRef = useRef<V86Instance | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadingStatus, setLoadingStatus] = useState('Initializing...');
   const [error, setError] = useState<string | null>(null);
+  const [loadingProgress, setLoadingProgress] = useState(0);
 
   const updateStatus = useCallback((status: string) => {
     setLoadingStatus(status);
@@ -54,63 +63,88 @@ export const V86Emulator = ({ onStatusChange, onReady }: V86EmulatorProps) => {
 
   useEffect(() => {
     let mounted = true;
+    let V86Constructor: new (options: V86Options) => V86Instance;
 
     const loadV86 = async () => {
       try {
         updateStatus('Loading v86 emulator...');
-        
-        // Load v86 script from CDN
-        if (!window.V86Starter) {
-          await new Promise<void>((resolve, reject) => {
-            const script = document.createElement('script');
-            script.src = 'https://cdn.jsdelivr.net/npm/v86@latest/build/libv86.js';
-            script.onload = () => resolve();
-            script.onerror = () => reject(new Error('Failed to load v86'));
-            document.head.appendChild(script);
-          });
+        setLoadingProgress(10);
+
+        // Dynamically import v86 from the npm package
+        const v86Module = await import('v86');
+        // The module exports V86 as both default and named export
+        V86Constructor = v86Module.V86 || v86Module.default;
+
+        if (!V86Constructor) {
+          console.error('V86 module exports:', Object.keys(v86Module));
+          throw new Error('Could not find V86 constructor in module');
         }
 
         if (!mounted || !screenRef.current) return;
 
-        updateStatus('Starting virtual machine...');
+        updateStatus('Initializing VM...');
+        setLoadingProgress(30);
 
-        // Use a lightweight Linux image - Buildroot Linux
-        const emulator = new window.V86Starter({
-          wasm_path: 'https://cdn.jsdelivr.net/npm/v86@latest/build/v86.wasm',
+        // Create the screen container structure that v86 expects
+        const screenContainer = screenRef.current;
+        
+        // Clear any existing content
+        screenContainer.innerHTML = '';
+        
+        // Create the required child div for the canvas
+        const screenDiv = document.createElement('div');
+        screenDiv.style.width = '100%';
+        screenDiv.style.height = '100%';
+        screenContainer.appendChild(screenDiv);
+
+        updateStatus('Starting Linux VM...');
+        setLoadingProgress(50);
+
+        // Use WASM from bundled node_modules or proxy
+        // Try bundled first, fall back to proxy
+        const wasmPath = v86WasmUrl || WASM_URL;
+
+        const emulator = new V86Constructor({
+          wasm_path: wasmPath,
           memory_size: 128 * 1024 * 1024, // 128MB RAM
           vga_memory_size: 8 * 1024 * 1024, // 8MB VRAM
-          screen_container: screenRef.current,
-          bios: {
-            url: 'https://cdn.jsdelivr.net/npm/v86@latest/bios/seabios.bin',
-          },
-          vga_bios: {
-            url: 'https://cdn.jsdelivr.net/npm/v86@latest/bios/vgabios.bin',
-          },
-          // Using the v86 demo Linux image (Buildroot)
-          cdrom: {
-            url: 'https://i.copy.sh/linux4.iso',
-          },
+          screen_container: screenContainer,
+          bios: { url: BIOS_URL },
+          vga_bios: { url: VGA_BIOS_URL },
+          cdrom: { url: LINUX_IMAGE_URL },
           autostart: true,
         });
 
         emulatorRef.current = emulator;
 
-        // Listen for serial output
-        emulator.add_listener('serial0-output-byte', (byte: string) => {
-          const char = String.fromCharCode(parseInt(byte as unknown as string));
-          console.log(char);
+        // Listen for emulator ready event
+        emulator.add_listener('emulator-ready', () => {
+          console.log('V86 Emulator ready');
+          setLoadingProgress(80);
+          updateStatus('Booting...');
         });
 
-        // Wait a bit for boot
-        setTimeout(() => {
+        // Listen for screen updates to know when OS is running
+        emulator.add_listener('screen-set-mode', () => {
           if (mounted) {
+            setLoadingProgress(100);
             setIsLoading(false);
             updateStatus('Running');
             onReady?.();
           }
-        }, 2000);
+        });
+
+        // Fallback: Hide loading after timeout
+        setTimeout(() => {
+          if (mounted && isLoading) {
+            setIsLoading(false);
+            updateStatus('Running');
+            onReady?.();
+          }
+        }, 30000);
 
       } catch (err) {
+        console.error('V86 Error:', err);
         if (mounted) {
           setError(err instanceof Error ? err.message : 'Failed to start VM');
           setIsLoading(false);
@@ -123,17 +157,24 @@ export const V86Emulator = ({ onStatusChange, onReady }: V86EmulatorProps) => {
     return () => {
       mounted = false;
       if (emulatorRef.current) {
-        emulatorRef.current.destroy();
+        try {
+          emulatorRef.current.stop();
+        } catch (e) {
+          console.warn('Error stopping emulator:', e);
+        }
       }
     };
   }, [updateStatus, onReady]);
 
   if (error) {
     return (
-      <div className="flex h-full w-full items-center justify-center bg-vm-screen">
-        <div className="text-center text-destructive">
-          <p className="text-lg font-semibold">VM Error</p>
-          <p className="text-sm opacity-80">{error}</p>
+      <div className="flex h-full w-full flex-col items-center justify-center bg-vm-screen p-4">
+        <div className="text-center">
+          <p className="text-lg font-semibold text-destructive">VM Error</p>
+          <p className="mt-2 text-sm text-destructive/80">{error}</p>
+          <p className="mt-4 text-xs text-muted-foreground">
+            Try refreshing the page or check your network connection.
+          </p>
         </div>
       </div>
     );
@@ -143,10 +184,16 @@ export const V86Emulator = ({ onStatusChange, onReady }: V86EmulatorProps) => {
     <div className="relative h-full w-full bg-vm-screen">
       {isLoading && (
         <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-vm-screen">
-          <div className="mb-4 h-8 w-8 animate-spin rounded-full border-2 border-vm-text border-t-transparent" />
-          <p className="text-vm-text text-sm">{loadingStatus}</p>
-          <p className="text-vm-text/60 mt-2 text-xs">
-            Downloading Linux image (~20MB)...
+          <div className="mb-4 h-10 w-10 animate-spin rounded-full border-2 border-vm-text border-t-transparent" />
+          <p className="text-vm-text text-sm font-medium">{loadingStatus}</p>
+          <div className="mt-4 h-2 w-48 overflow-hidden rounded-full bg-muted">
+            <div 
+              className="h-full bg-vm-text transition-all duration-300"
+              style={{ width: `${loadingProgress}%` }}
+            />
+          </div>
+          <p className="text-vm-text/60 mt-4 max-w-xs text-center text-xs">
+            Downloading and booting Linux... This may take 30-60 seconds depending on your connection.
           </p>
         </div>
       )}
