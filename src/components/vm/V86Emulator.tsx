@@ -35,7 +35,7 @@ const PROXY_BASE = `${SUPABASE_URL}/functions/v1/vm-image-proxy`;
 
 const BIOS_URL = `${PROXY_BASE}?image=bios`;
 const VGA_BIOS_URL = `${PROXY_BASE}?image=vgabios`;
-const LINUX_IMAGE_URL = `${PROXY_BASE}?image=linux`;
+const LINUX_IMAGE_URL = `${PROXY_BASE}?image=alpine`;
 
 export const V86Emulator = () => {
   const screenRef = useRef<HTMLDivElement>(null);
