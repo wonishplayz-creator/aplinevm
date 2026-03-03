@@ -121,7 +121,7 @@ export const VMWindow = ({ onClose, onMinimize }: VMWindowProps) => {
 
       {/* VM Screen */}
       <div className="relative flex-1 overflow-hidden bg-vm-screen">
-        <V86Emulator onStatusChange={setVmStatus} />
+        <V86Emulator />
       </div>
 
       {/* Resize handle */}

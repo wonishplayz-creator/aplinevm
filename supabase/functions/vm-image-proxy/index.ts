@@ -7,9 +7,10 @@ const corsHeaders = {
   'Access-Control-Expose-Headers': 'Content-Length, Content-Range',
 };
 
-// Pre-approved image URLs (for security - only proxy known safe images)
+// Use Alpine Linux virtual image for a more complete Linux experience
 const ALLOWED_IMAGES: Record<string, string> = {
   'linux': 'https://copy.sh/v86/images/linux4.iso',
+  'alpine': 'https://dl-cdn.alpinelinux.org/alpine/v3.18/releases/x86/alpine-virt-3.18.9-x86.iso',
   'freedos': 'https://copy.sh/v86/images/freedos722.img',
   'bios': 'https://copy.sh/v86/bios/seabios.bin',
   'vgabios': 'https://copy.sh/v86/bios/vgabios.bin',
@@ -17,7 +18,6 @@ const ALLOWED_IMAGES: Record<string, string> = {
 };
 
 serve(async (req) => {
-  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
@@ -25,7 +25,7 @@ serve(async (req) => {
   try {
     const url = new URL(req.url);
     const imageKey = url.searchParams.get('image');
-    
+
     if (!imageKey || !ALLOWED_IMAGES[imageKey]) {
       return new Response(
         JSON.stringify({ error: 'Invalid image key. Available: ' + Object.keys(ALLOWED_IMAGES).join(', ') }),
@@ -34,43 +34,42 @@ serve(async (req) => {
     }
 
     const imageUrl = ALLOWED_IMAGES[imageKey];
-    
-    // Forward range requests for partial content
+
     const rangeHeader = req.headers.get('range');
     const fetchHeaders: HeadersInit = {};
     if (rangeHeader) {
       fetchHeaders['Range'] = rangeHeader;
     }
-    
+
     console.log(`Proxying ${imageKey} from ${imageUrl}`);
-    
+
     const response = await fetch(imageUrl, { headers: fetchHeaders });
-    
+
     if (!response.ok && response.status !== 206) {
       throw new Error(`Failed to fetch image: ${response.status} ${response.statusText}`);
     }
-    
+
     const responseHeaders: HeadersInit = {
       ...corsHeaders,
       'Content-Type': response.headers.get('Content-Type') || 'application/octet-stream',
+      'Cache-Control': 'public, max-age=604800',
     };
-    
-    // Forward content-length and range headers
+
     const contentLength = response.headers.get('Content-Length');
     if (contentLength) {
       responseHeaders['Content-Length'] = contentLength;
     }
-    
+
     const contentRange = response.headers.get('Content-Range');
     if (contentRange) {
       responseHeaders['Content-Range'] = contentRange;
     }
-    
+
     return new Response(response.body, {
       status: response.status,
       headers: responseHeaders,
     });
-    
+
   } catch (error) {
     console.error('Proxy error:', error);
     return new Response(
